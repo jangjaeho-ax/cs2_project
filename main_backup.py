@@ -1,13 +1,12 @@
 import cv2
 import mediapipe as mp
 import numpy as np
-import time
-
+from gtts import gTTS
+from playsound import playsound
+import tensorflow as tf
 from tensorflow.keras.models import load_model
 from collections import deque
 from statistics import mean
-from gtts import gTTS
-from playsound import playsound
 
 def unit_vector(vector):
     """ 벡터의 단위 벡터 리턴 """
@@ -58,28 +57,25 @@ def main():
     #playsound(audio)
 
     pri_hand_pt = None
-    pri_nose_tip_pt = None
-    pri_nose_udr_pt = None
+    pri_nose_pt = None
+    ori_nose_pt = None
+
 
     #nose_ang_vec = np.zeros(7)
     #계산을 위한 벡터와 큐
     hand_mvt_vec = np.zeros(2)
     hand_mvt_queue = deque([])
     nose_ang_queue = deque([])
+    nose_pt_queue = deque([])
 
     #설정된 프레임 단위 만큼 프레임을 포착해 움직임을 계산한다.
-    timer_begin_pt = 0
-    timer_end_pt = 0
+    cnt = 0
 
     cap = cv2.VideoCapture(0)
 
     while cap.isOpened():
-
-        flag = False
-
         success, image = cap.read()
         img_h, img_w, img_c = image.shape
-
 
         # 이미지를 flip하여 화면상에서 보기 편하게 만든다.
         # BGR 이미지를 RGB로 변환한다.
@@ -90,9 +86,6 @@ def main():
         hand_result = hands.process(image)
         pose_result = pose.process(image)
 
-        pre_nose_tip_pt = None
-        pre_nose_udr_pt = None
-        pre_hand_pt = None
 
 
         # To improve performance
@@ -104,34 +97,37 @@ def main():
 
         className = ''
 
-
+        pre_nose_pt = None
         if face_result.multi_face_landmarks:
             for face_landmarks in face_result.multi_face_landmarks:
                 for idx, lm in enumerate(face_landmarks.landmark):
                         if idx == 1:
-                            pre_nose_tip_pt = np.array([lm.x * img_w, lm.y * img_h, lm.z * 100])
+                            pre_nose_pt = np.array([lm.x * img_w, lm.y * img_h, lm.z * 100])
+                            nose_pt_queue.append(pre_nose_pt)
+                            #print(lm)
+                            if ori_nose_pt is None:
+                                ori_nose_pt = np.array([lm.x * img_w, lm.y * img_h, lm.z * 200])
                         if idx == 2:
-                            pre_nose_udr_pt = np.array([lm.x * img_w, lm.y * img_h, lm.z * 100])
+                            pre_nose_pt = np.array([lm.x * img_w, lm.y * img_h, lm.z * 100])
+                            nose_pt_queue.append(pre_nose_pt)
 
 
                         # Convert it to the NumPy array
 
-                # 이전 포인트가 None이 아닌 경우
-                if pri_nose_tip_pt is not None and pre_nose_udr_pt is not None:
+                # 이전 손 포인트가 None이 아닌 경우
+                if pri_nose_pt is not None:
                     # 움직임 벡터를 구함
-                    pre_vec = pre_nose_tip_pt - pre_nose_udr_pt
-                    pri_vec = pri_nose_tip_pt - pri_nose_udr_pt
+                    pre_vec = pre_nose_pt - ori_nose_pt
+                    pri_vec = pri_nose_pt - ori_nose_pt
                     xz_angle = get_xz_yz_angle(pre_vec, pri_vec)[0]
                     if xz_angle < 2:
                         nose_ang_queue.append(xz_angle)
                     #nose_ang_vec = np.append(get_xz_yz_angle(pre_vec, pri_vec)[0], nose_ang_vec)
 
-                pri_nose_tip_pt = pre_nose_tip_pt
-                pri_nose_udr_pt = pre_nose_udr_pt
-
+                pri_nose_pt = pre_nose_pt
 
         #손 움직임 인식 부분
-
+        pre_hand_pt = None
 
         if hand_result.multi_hand_landmarks:
             landmarks = []
@@ -163,9 +159,8 @@ def main():
                         hand_mvt_queue.append(v)
                         hand_mvt_vec += v
 
-
                 pri_hand_pt = pre_hand_pt
-                # 제스처 예측
+                # Predict gesture
                 prediction = model.predict([landmarks])
                 # print(prediction)
                 classID = np.argmax(prediction)
@@ -175,59 +170,81 @@ def main():
             prior_hand_lms = hand_result.multi_hand_landmarks
 
             # show the prediction on the frame
+
+        # 포즈 주석을 이미지 위에 그립니다.
+        image.flags.writeable = True
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        mp_drawing.draw_landmarks(image, pose_result.pose_landmarks, mp_pose.POSE_CONNECTIONS)
         cv2.putText(image, className, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
                     1, (0, 0, 255), 2, cv2.LINE_AA)
 
-        # 포즈 주석을 이미지 위에 표시.
-
-        #mp_drawing.draw_landmarks(image, pose_result.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-
-
-
-        timer_end_pt =time.time()
-        #얼굴 고개 회전 판정 계산 부분
-        if len(nose_ang_queue) >= nose_brkt:
-            m = mean(nose_ang_queue)
-            text = ""
-            # print(m)
-            if m > 0.4:
-                if timer_begin_pt == 0:
-                    flag = True
-                text = "move head"
-                print(text)
-            a = nose_ang_queue.popleft()
-            cv2.putText(image, text, (10, 150), cv2.FONT_HERSHEY_SIMPLEX,
-                        1, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.imshow('output', image)
+        #cnt += 1
         #손 움직임 계산 부분
         if len(hand_mvt_queue) >= hand_brkt:
             mx, my = hand_mvt_vec
-            text =""
             if abs(mx) >= abs(my):
                 if mx > 30:
-                    text ='move right'
-                    print(text)
+                    print('move right')
                 elif mx < -30:
-                    text = 'move left'
-                    print(text)
+
+                    print('move left')
             else:
                 if my > 30:
-                    text = 'move down'
-                    print(text)
+                    print('move down')
                 elif my < -30:
-                    text = 'move up'
-                    print(text)
+                    print('move up')
 
-            cv2.putText(image, text, (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
-                        1, (0, 0, 255), 2, cv2.LINE_AA)
             v = hand_mvt_queue.popleft()
             hand_mvt_vec -= v
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        cv2.imshow('output', image)
+        #얼굴 움직임 계산 부분
+        if len(nose_pt_queue) >= nose_brkt:
+                p = nose_pt_queue.popleft()
+                #회전 판정을 계산할 원점을 다시 설정
+                ori_nose_pt = p
+        if len(nose_ang_queue) >= nose_brkt:
+            m = mean(nose_ang_queue)
+            # print(m)
+            if m > 0.4:
+                print(nose_ang_queue)
+                print("move head")
+            a = nose_ang_queue.popleft()
 
 
-        timer_result = timer_end_pt - timer_begin_pt
-        if timer_result >= 7:
-            timer_begin_pt = 0
+
+        #손 움직임 계산
+        '''
+        if cnt == hand_brkt:
+            #설정된 프레임 단위 만큼 손의 한지점의 움직임을 벡터로 나타냄
+            #print(hand_mvt_vec)
+            mx , my = hand_mvt_vec
+            if abs(mx) >= abs(my):
+                if mx > 30:
+                    print('move right')
+                elif mx < -30:
+                    print('move left')
+            else:
+                if my > 30:
+                    print('move down')
+                elif my < -30:
+                    print('move up')
+
+            m = nose_ang_vec.mean()
+            #print(m)
+            if m > 0.3:
+                print(m)
+                print("move head")
+            cnt = 0
+
+            nose_ang_vec = np.zeros(7)
+            hand_mvt_vec = np.zeros(2)
+
+            pri_hand_pt = None
+            ori_nose_pt = None
+
+            print('-' * 10)
+            cv2.waitKey()
+        '''
 
         if cv2.waitKey(5) & 0xFF == ord('p'):
             print('waiting...')
@@ -235,12 +252,6 @@ def main():
         if cv2.waitKey(5) & 0xFF == ord('q'):
             print('end program')
             break
-
-
-        if flag == True:
-            playsound(audio)
-            timer_begin_pt = time.time()
-
     cap.release()
 if __name__ == "__main__":
     main()
